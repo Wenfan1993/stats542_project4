@@ -70,9 +70,9 @@ shinyServer(function(input, output, session) {
       ratings$Timestamp = NULL
       
       set.seed(100)
-      train.id = sample(nrow(ratings), floor(nrow(ratings)) * 0.8)
-      train = ratings[train.id, ]
-      test = ratings[-train.id, ]
+      #train.id = sample(nrow(ratings), floor(nrow(ratings)) * 0.8)
+      train = ratings#[train.id, ]
+      #test = ratings[-train.id, ]
       
       i = paste0('u', train$UserID)
       j = paste0('m', train$MovieID)
