@@ -1,0 +1,291 @@
+---
+title: "Project 4 Movie Recommendation Report"
+output:
+  html_notebook:
+    theme: readable
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r, message=FALSE}
+library(recommenderlab)
+library(Matrix)
+library(magrittr)
+library(dplyr) 
+myurl = "https://liangfgithub.github.io/MovieData/"
+
+ratings = read.csv(paste0(myurl, 'ratings.dat?raw=true'), 
+                   sep = ':',
+                   colClasses = c('integer', 'NULL'), 
+                   header = FALSE)
+colnames(ratings) = c('UserID', 'MovieID', 'Rating', 'Timestamp')
+ratings$Timestamp = NULL
+```
+
+## User Based CF
+
+User-based collaborative filtering is a technique that models items (movie rating in our scenario), based off similarity of the associated object (in our scenario, the similarity between users). In another word, to predict the rating for user X, we will need to find a set of N other users, whose ratings are considered 'similar' to user X's rating, and estimate user X's rating of the other movies not yet rated, based off the the ratings from the other N users.For this project, we chose the nearest 25 neighbors. 
+
+Similarity between the users could be measured with different approaches, like count of common elements, cosine, etc. We use cosine to measure similarity in our project.
+
+Cosine(x,y) =x·y/(‖x‖‖y‖)
+
+It is common practice to normalize the data prior to training. Normalization helps to bring data to the same scale - in our case, it will help to bring the users (measured by their ratings and its variation) to the same scale, to better measure the user's similarity. We chose to use Z-score normalization, which method calculates the mean  and standard deviation of the ratings per user, and normalizes the ratings by subtracting the mean and then diving it by the standard deviation. 
+
+normalized value = (value - mean)/standard deviation
+
+Once the similarities are calculated and the nearest neighbors are identified, the prediction is generated based on the weighted average of the neighbors' rating, with each neighbor assigned the weight that corresponds with the similarity score.
+
+For missing values, we used the mean rating per test user as the default supplement; if the test user does not have any rating, we used 2.5. 
+
+### Training Test Split
+
+We created the training set that includes 80% of the rows of `ratings.dat`, while the test set the remaining 20%
+
+### Evaluation metrics
+We used RMSE for evaluation purpose. We ran the evalation through 10 iterations. 
+
+
+```{r}
+overallRMSE_User = c()
+
+for (i_iter in 1:10){
+set.seed(i_iter * 100)
+train.id = sample(nrow(ratings), floor(nrow(ratings)) * 0.8)
+train = ratings[train.id, ]
+test = ratings[-train.id, ]
+
+i = paste0('u', train$UserID)
+j = paste0('m', train$MovieID)
+x = train$Rating
+tmp = data.frame(i, j, x, stringsAsFactors = T)
+Rmat = sparseMatrix(as.integer(tmp$i), as.integer(tmp$j), x = tmp$x)
+rownames(Rmat) = levels(tmp$i)
+colnames(Rmat) = levels(tmp$j)
+Rmat = new('realRatingMatrix', data = Rmat)
+
+rec_UBCF = Recommender(Rmat, method = 'UBCF',
+                       parameter = list(normalize = 'Z-score', 
+                                        method = 'Cosine',
+                                        nn = 25))
+
+recom = predict(rec_UBCF, 
+                Rmat, type = 'ratings')  
+
+rec_list = as(recom, 'list')  # each element are ratings of that user
+
+test.pred = test
+test.pred$Rating = NA
+
+test_rating_by_user = test %>% group_by(UserID)
+test_rating_by_user_df = test_rating_by_user %>% summarise(
+  Rating = mean(Rating)
+)
+
+# For all lines in test file, one by one
+for (u in 1:nrow(test)){
+  # Read userid and movieid from columns 2 and 3 of test data
+  userid = as.character(test$UserID[u])
+  movieid = as.character(test$MovieID[u])
+  
+  rating = rec_list[[paste0('u',userid)]][paste0('m',movieid)]
+  # handle missing values; 2.5 might not be the ideal choice
+  replace_na_value = test_rating_by_user_df[test_rating_by_user_df$UserID== userid,2]$Rating
+  replace_na_value = ifelse(length(replace_na_value)==0, 2.5, replace_na_value)
+  test.pred$Rating[u] = ifelse(is.na(rating), 2.5, max(min(rating,5),0))
+}
+
+# Calculate RMSE
+RMSE = sqrt(mean((test$Rating - test.pred$Rating)^2))
+overallRMSE_User[i_iter] = RMSE
+}
+
+```
+
+### Evaluation of RMSE
+
+* See below the RMSE of the 10 iterations, for User-based CF approach
+
+```{r}
+print("User Based CF, the RMSE from the 10 iterations are")
+print(overallRMSE_User)
+plot(overallRMSE_User)
+```
+
+
+## Item Based CF
+
+Item-based collaborative filtering is a technique that models the item (movie rating in our scenario), based on other similar items, belong to the same object (in our scenario, the based on the other similar items rated by the same user). In another word, the ratings are predicted using the same user’s ratings on the similar/neighboring movies. For this project, we chose the nearest 25 neighbors. 
+
+Similarity between the items could be measured with different approaches. We use cosine to measure similarity in our project.
+
+Cosine(x,y) =x·y/(‖x‖‖y‖)
+
+Consistent with discussed above, since normalization helps to bring data to the same scale - in our case, it will help to bring the movies to the same scale , to better measure the movies' similarity. Here, We chose to center the data, essentially substracting the mean. 
+
+normalized value = (value - mean)
+
+Once the similarities are calculated and the nearest neighbors (i.e. the most similar rated movies of the same user) are identified, here with the below implementation approach, the prediction is generated based on the average of the neighbors' rating.
+
+For missing values, we used the mean rating per movie as the default supplement; if the movie does not have any rating, we used 2.5. 
+
+### Training Test Split
+
+We created the training set that includes 80% of the rows of `ratings.dat`, while the test set the remaining 20%
+
+### Evaluation metrics
+We used RMSE for evaluation purpose. We ran the evalation through 10 iterations. 
+
+```{r}
+overallRMSE_item = c()
+
+for (i_iter in 1:1){
+  set.seed(i_iter * 100)
+#set up parameters
+  p <- list(
+    k = 25,
+    method="Cosine",
+    normalize = "center",
+    normalize_sim_matrix = FALSE,
+    alpha = 0.5,
+    na_as_zero = FALSE
+  )
+  
+  #construct the sparsematrix
+  train.id = sample(nrow(ratings), floor(nrow(ratings)) * 0.8)
+  train = ratings[train.id, ]
+  test = ratings[-train.id, ]
+  i = paste0('u', train$UserID)
+  j = paste0('m', train$MovieID)
+  x = train$Rating
+  tmp = data.frame(i, j, x, stringsAsFactors = T)
+  Rmat = sparseMatrix(as.integer(tmp$i), as.integer(tmp$j), x = tmp$x)
+  rownames(Rmat) = levels(tmp$i)
+  colnames(Rmat) = levels(tmp$j)
+  data = new('realRatingMatrix', data = Rmat)
+  
+  #normalize
+  if(!is.null(p$normalize))
+    data <- normalize(data, method=p$normalize)
+  
+  # calculate similarity
+  sim <- as.matrix(similarity(data, method=p$method, which="items",
+                              args=list(alpha=p$alpha, na_as_zero=p$na_as_zero)))
+  
+  ## normalize rows to 1
+  if(p$normalize_sim_matrix) sim <- sim/rowSums(sim, na.rm=TRUE)
+  
+  ## reduce similarity matrix to keep only the k highest similarities
+  diag(sim) <- NA
+  ##sim[!is.finite(sim)] <- NA
+  
+  for(i in 1:nrow(sim))
+    sim[i,head(order(sim[i,], decreasing=FALSE, na.last=FALSE),
+               ncol(sim) - p$k)] <- NA
+  
+  ## make sparse
+  sim <- dropNA(sim)
+  
+  model <- c(list(
+    description = "IBCF: Reduced similarity matrix",
+    sim = sim
+  ), p
+  )
+  
+  predict <- function(model, newdata, n = 25,
+                      data=NULL, type=c("topNList", "ratings", "ratingMatrix"), ...) {
+    
+    type <- match.arg(type)
+    ## newdata are userid
+    if(is.numeric(newdata)) {
+      if(is.null(data) || !is(data, "ratingMatrix"))
+        stop("If newdata is a user id then data needes to be the training dataset.")
+      newdata <- data[newdata,]
+    }
+    
+    if(ncol(newdata) != nrow(model$sim)) stop("number of items in newdata does not match model.")
+    
+    n <- as.integer(n)
+    
+    if(!is.null(model$normalize))
+      newdata <- normalize(newdata, method=model$normalize)
+    
+    ## predict all ratings
+    sim <- model$sim
+    u <- as(newdata, "dgCMatrix")
+    
+    ratings <- t(as(tcrossprod(sim,u) / tcrossprod(sim, u!=0), "matrix"))
+    
+    ratings <- new("realRatingMatrix", data=dropNA(ratings),
+                   normalize = getNormalize(newdata))
+    ratings <- denormalize(ratings)
+    
+    returnRatings(ratings, newdata, type, n)
+  }
+  
+  #compile test dataframe
+  m <- matrix(0, ncol = dim(data)[2], nrow = length(unique(test$UserID)))
+  tem_test = data.frame((m))
+  colnames(tem_test) = colnames(data)
+  rownames(tem_test) = paste0('u',unique(test$UserID))
+  
+  for (i in 1:dim(test)[1]){
+    test_userid = paste0('u',test[i,]$UserID)
+    test_movie =  paste0('m',test[i,]$MovieID)
+    test_rate = test[i,]$Rating
+    tem_test[test_userid,test_movie] = test_rate
+  }
+  
+  Rmat_test = Matrix(as.matrix(tem_test), sparse = TRUE) 
+  rownames(Rmat_test) = rownames(tem_test)
+  colnames(Rmat_test) = colnames(tem_test)
+  Rmat_test = new('realRatingMatrix', data = Rmat_test)
+  Rmat_test_use = Rmat_test[, colnames(data)]
+  newdata = Rmat_test_use
+  recom  = predict(model, newdata, type="ratings")
+  
+  #evaluation  
+  rec_list = as(recom, 'list')  # each element are ratings of that user
+  test.pred = test
+  test.pred$Rating = NA
+  test_rating_by_movie = test %>% group_by(MovieID)
+  test_rating_by_movie_df = test_rating_by_movie %>% summarise(
+    Rating = mean(Rating)
+  )
+  #default = 0
+  # For all lines in test file, one by one
+  for (u in 1:nrow(test)){
+    # Read userid and movieid from columns 2 and 3 of test data
+    userid = as.character(test$UserID[u])
+    movieid = as.character(test$MovieID[u])
+  
+    rating = rec_list[[paste0('u',userid)]][paste0('m',movieid)]
+    #if (is.na(rating)){
+    #  default = default +1
+    #}
+    # handle missing values; 2.5 might not be the ideal choice
+    replace_na_value = test_rating_by_movie_df[test_rating_by_movie_df$MovieID== movieid,2]$Rating
+    replace_na_value = ifelse(length(replace_na_value)==0, 2.5, replace_na_value)
+    test.pred$Rating[u] = ifelse(is.na(rating), replace_na_value, max(min(rating,5),0))
+  }
+
+  # Calculate RMSE
+  test.pred$Rating[is.na(test.pred$Rating)] <- 2.5
+  RMSE = sqrt(mean((test$Rating - test.pred$Rating)^2))
+  overallRMSE_item[i_iter] = RMSE
+}
+```
+
+### Evaluation of RMSE
+
+* See below the RMSE of the 10 iterations, for Item-based CF approach
+
+```{r}
+print("Item Based CF, the RMSE from the 10 iterations are")
+print(overallRMSE_item)
+plot(overallRMSE_item)
+```
